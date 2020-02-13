@@ -1,0 +1,689 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: sentry
+parameters:
+- description: Namespace Sentry is deployed to.
+  name: NAMESPACE
+  required: true
+- description: Optional IP whitelist for Sentry route.
+  name: SENTRY_IP_WHITELIST
+  value: ''
+- description: External Sentry hostname.
+  name: SENTRY_HOSTNAME
+  required: true
+- description: Name of the service that the Sentry route is exposing, e.g. to interpose a WAF. Defaults to 'sentry'.
+  name: SENTRY_ROUTE_SERVICE_NAME
+  value: sentry
+- description: Port of the service that the Sentry route is exposing, e.g. to interpose a WAF. Defaults to 'http'.
+  name: SENTRY_ROUTE_SERVICE_PORT
+  value: http
+- description: Sentry Administrator Email Address.
+  name: SENTRY_ADMIN_EMAIL
+  required: true
+- description: Sentry Administrator Password.
+  name: SENTRY_ADMIN_PASSWORD
+  required: true
+- description: Sentry Initial Organization.
+  name: SENTRY_INITIAL_ORGANIZATION
+  required: true
+- description: Senty Initial Team.
+  name: SENTRY_INITIAL_TEAM
+  required: true
+- description: Email host used by sentry for sending mail. Set to empty to disable mail delivery.
+  displayName: Sentry Email Host
+  name: SENTRY_EMAIL_HOST
+  required: false
+- description: Email sender address use by sentry for sending mail.
+  displayName: Sentry Server Email Address
+  name: SENTRY_SERVER_EMAIL
+  required: true
+- description: Secret key used for Sentry session signing
+  displayName: Sentry Secret Key
+  name: SENTRY_SECRET_KEY
+  required: true
+- description: Name of the PostgreSQL database accessed.
+  displayName: PostgreSQL Database Name
+  name: POSTGRESQL_DATABASE
+  required: true
+- description: Username for PostgreSQL user that will be used for accessing the database.
+  displayName: PostgreSQL Connection Username
+  name: POSTGRESQL_USER
+  required: true
+- description: Password for the PostgreSQL connection user.
+  displayName: PostgreSQL Connection Password
+  name: POSTGRESQL_PASSWORD
+  required: true
+- description: Password for the PostgreSQL admin user.
+  displayName: PostgreSQL Admin Password
+  name: POSTGRESQL_ADMIN_PASSWORD
+  required: true
+- description: Password for the Redis connection user.
+  displayName: Redis Connection Password
+  name: REDIS_PASSWORD
+  required: true
+- description: Access key used for accessing Sentry Minio bucket.
+  displayName: Minio Access Key
+  name: MINIO_ACCESS_KEY
+  required: true
+- description: Secret key used for accessing Sentry Minio bucket.
+  displayName: Minio Secret Key
+  name: MINIO_SECRET_KEY
+  required: true
+- description: Schedule for Sentry cleanup job as cron expression. Defaults to '15 0 * * *'.
+  displayName: Sentry cleanup job schedule.
+  name: SENTRY_CLEANUP_SCHEDULE
+  value: "15 0 * * *"
+- description: Clean up data older than given days. Defaults to 30.
+  displayName: Sentry Cleanup Days.
+  name: SENTRY_CLEANUP_DAYS
+  value: "30"
+- name: KC_SERVER_URL
+  required: true
+- name: KC_REALM
+  required: true
+- name: KC_CLIENT_ID
+  required: true
+- name: KC_CLIENT_SECRET
+  required: true
+objects:
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      run: sentry-cron
+    name: sentry-cron
+  spec:
+    replicas: 1
+    selector:
+      run: sentry-cron
+    strategy:
+      activeDeadlineSeconds: 21600
+      resources: {}
+      rollingParams:
+        intervalSeconds: 1
+        maxSurge: 25%
+        maxUnavailable: 25%
+        timeoutSeconds: 600
+        updatePeriodSeconds: 1
+      type: Rolling
+    template:
+      metadata:
+        labels:
+          run: sentry-cron
+      spec:
+        containers:
+        - command:
+          - sentry
+          - run
+          - cron
+          env:
+          - name: SENTRY_POSTGRES_HOST
+            value: postgresql
+          - name: SENTRY_EMAIL_HOST
+            value: ${SENTRY_EMAIL_HOST}
+          - name: SENTRY_SERVER_EMAIL
+            value: ${SENTRY_SERVER_EMAIL}
+          - name: SENTRY_FILE_ACCESS
+            valueFrom:
+              secretKeyRef:
+                key: minio-access-key
+                name: sentry
+          - name: SENTRY_FILE_BUCKET
+            value: sentry
+          - name: SENTRY_FILE_HOST
+            value: http://minio:9000
+          - name: SENTRY_FILE_SECRET
+            valueFrom:
+              secretKeyRef:
+                key: minio-secret-key
+                name: sentry
+          - name: SENTRY_DB_NAME
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-database
+                name: sentry
+          - name: SENTRY_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-admin-password
+                name: sentry
+          - name: SENTRY_REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: redis-password
+                name: sentry
+          - name: SENTRY_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                key: sentry-secret-key
+                name: sentry
+          - name: SENTRY_DB_USER
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-admin-user
+                name: sentry
+          name: sentry-cron
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 10m
+              memory: 100Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+    test: false
+    triggers:
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - sentry-cron
+        from:
+          kind: ImageStreamTag
+          name: sentry-oauth:cron
+      type: ImageChange
+    - type: ConfigChange
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      run: sentry-web
+    name: sentry-web
+  spec:
+    replicas: 1
+    selector:
+      run: sentry-web
+    strategy:
+      activeDeadlineSeconds: 21600
+      resources: {}
+      rollingParams:
+        intervalSeconds: 1
+        maxSurge: 25%
+        maxUnavailable: 25%
+        timeoutSeconds: 600
+        updatePeriodSeconds: 1
+        pre:
+          failurePolicy: Retry
+          execNewPod:
+            containerName: sentry-web
+            command: [ "/populator/sentry-populator.sh"]
+            volumes:
+            - sentry-populator
+        post:
+          failurePolicy: Ignore
+          tagImages:
+          - containerName: sentry-web
+            to:
+              kind: ImageStreamTag
+              name: sentry-oauth:worker
+          - containerName: sentry-web
+            to:
+              kind: ImageStreamTag
+              name: sentry-oauth:cron
+      type: Rolling
+    template:
+      metadata:
+        labels:
+          run: sentry-web
+      spec:
+        containers:
+        - env:
+          - name: SENTRY_POSTGRES_HOST
+            value: postgresql
+          - name: SENTRY_USE_SSL
+            value: "true"
+          - name: SENTRY_EMAIL_HOST
+            value: smtp.company.com
+          - name: SENTRY_SERVER_EMAIL
+            value: noreply@company.com
+          - name: SENTRY_FILE_ACCESS
+            valueFrom:
+              secretKeyRef:
+                key: minio-access-key
+                name: sentry
+          - name: SENTRY_FILE_BUCKET
+            value: sentry
+          - name: SENTRY_FILE_HOST
+            value: http://minio:9000
+          - name: SENTRY_FILE_SECRET
+            valueFrom:
+              secretKeyRef:
+                key: minio-secret-key
+                name: sentry
+          - name: SENTRY_DB_NAME
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-database
+                name: sentry
+          - name: SENTRY_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-admin-password
+                name: sentry
+          - name: SENTRY_REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: redis-password
+                name: sentry
+          - name: SENTRY_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                key: sentry-secret-key
+                name: sentry
+          - name: SENTRY_DB_USER
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-admin-user
+                name: sentry
+          - name: SENTRY_SINGLE_ORGANIZATION
+            value: "FALSE"
+          - name: SENTRY_OIDC_DOMAIN
+            valueFrom:
+              secretKeyRef:
+                key: kc-discovery-url
+                name: sentry
+          - name: SENTRY_OIDC_CLIENT_ID
+            valueFrom:
+              secretKeyRef:
+                key: kc-client-id
+                name: sentry
+          - name: SENTRY_OIDC_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                key: kc-client-secret
+                name: sentry
+          image: sentry-oauth:web
+          imagePullPolicy: Always
+          name: sentry-web
+          ports:
+          - containerPort: 9000
+            protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: "/_health"
+              port: 9000
+          resources:
+            limits:
+              # also applies to populator which needs lots of memory
+              cpu: 2
+              memory: 3Gi
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /populator
+            name: sentry-populator
+        volumes:
+        - name: sentry-populator
+          configMap:
+            name: sentry-populator
+            defaultMode: 493
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+    test: false
+    triggers:
+    - type: ConfigChange
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - sentry-web
+        from:
+          kind: ImageStreamTag
+          name: sentry-oauth:web
+      type: ImageChange
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+      run: sentry-worker
+    name: sentry-worker
+  spec:
+    replicas: 1
+    selector:
+      run: sentry-worker
+    strategy:
+      activeDeadlineSeconds: 21600
+      resources: {}
+      rollingParams:
+        intervalSeconds: 1
+        maxSurge: 25%
+        maxUnavailable: 25%
+        timeoutSeconds: 600
+        updatePeriodSeconds: 1
+      type: Rolling
+    template:
+      metadata:
+        labels:
+          run: sentry-worker
+      spec:
+        containers:
+        - command:
+          - sentry
+          - run
+          - worker
+          env:
+          - name: SENTRY_POSTGRES_HOST
+            value: postgresql
+          - name: SENTRY_SERVER_EMAIL
+            value: ${SENTRY_SERVER_EMAIL}
+          - name: SENTRY_FILE_ACCESS
+            valueFrom:
+              secretKeyRef:
+                key: minio-access-key
+                name: sentry
+          - name: SENTRY_FILE_BUCKET
+            value: sentry
+          - name: SENTRY_FILE_HOST
+            value: http://minio:9000
+          - name: SENTRY_FILE_SECRET
+            valueFrom:
+              secretKeyRef:
+                key: minio-secret-key
+                name: sentry
+          - name: SENTRY_EMAIL_HOST
+            value: ${SENTRY_EMAIL_HOST}
+          - name: SENTRY_DB_NAME
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-database
+                name: sentry
+          - name: SENTRY_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-admin-password
+                name: sentry
+          - name: SENTRY_REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: redis-password
+                name: sentry
+          - name: C_FORCE_ROOT
+            value: "TRUE"
+          - name: SENTRY_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                key: sentry-secret-key
+                name: sentry
+          - name: SENTRY_DB_USER
+            valueFrom:
+              secretKeyRef:
+                key: postgresql-admin-user
+                name: sentry
+          imagePullPolicy: Always
+          name: sentry-worker
+          resources:
+            limits:
+              cpu: 200m
+              memory: 1Gi
+            requests:
+              cpu: 10m
+              memory: 256Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+    test: false
+    triggers:
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - sentry-worker
+        from:
+          kind: ImageStreamTag
+          name: sentry-oauth:worker
+      type: ImageChange
+    - type: ConfigChange
+- apiVersion: batch/v1beta1
+  kind: CronJob
+  metadata:
+    name: sentry-cleanup
+  spec:
+    concurrencyPolicy: Forbid
+    schedule: "${SENTRY_CLEANUP_SCHEDULE}"
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    jobTemplate:
+      spec:
+        template:
+          metadata:
+            name: sentry-cleanup
+            labels:
+              job: sentry-cleanup
+            annotations:
+              alpha.image.policy.openshift.io/resolve-names: '*'
+          spec:
+            containers:
+            - command:
+              - sentry
+              - cleanup
+              - --days
+              - "${SENTRY_CLEANUP_DAYS}"
+              env:
+              - name: SENTRY_POSTGRES_HOST
+                value: postgresql
+              - name: SENTRY_EMAIL_HOST
+                value: ${SENTRY_EMAIL_HOST}
+              - name: SENTRY_SERVER_EMAIL
+                value: ${SENTRY_SERVER_EMAIL}
+              - name: SENTRY_FILE_ACCESS
+                valueFrom:
+                  secretKeyRef:
+                    key: minio-access-key
+                    name: sentry
+              - name: SENTRY_FILE_BUCKET
+                value: sentry
+              - name: SENTRY_FILE_HOST
+                value: http://minio:9000
+              - name: SENTRY_FILE_SECRET
+                valueFrom:
+                  secretKeyRef:
+                    key: minio-secret-key
+                    name: sentry
+              - name: SENTRY_DB_NAME
+                valueFrom:
+                  secretKeyRef:
+                    key: postgresql-database
+                    name: sentry
+              - name: SENTRY_DB_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: postgresql-admin-password
+                    name: sentry
+              - name: SENTRY_REDIS_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: redis-password
+                    name: sentry
+              - name: SENTRY_SECRET_KEY
+                valueFrom:
+                  secretKeyRef:
+                    key: sentry-secret-key
+                    name: sentry
+              - name: SENTRY_DB_USER
+                valueFrom:
+                  secretKeyRef:
+                    key: postgresql-admin-user
+                    name: sentry
+              name: sentry-cleanup
+              image: sentry-oauth:cron
+              terminationMessagePath: /dev/termination-log
+              terminationMessagePolicy: File
+              volumeMounts: []
+            dnsPolicy: ClusterFirst
+            restartPolicy: OnFailure
+            schedulerName: default-scheduler
+            securityContext: {}
+            serviceAccount: default
+            terminationGracePeriodSeconds: 30
+            volumes: []
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      run: sentry
+    name: sentry
+  spec:
+    ports:
+    - name: http
+      port: 9000
+      protocol: TCP
+      targetPort: 9000
+    selector:
+      run: sentry-web
+    sessionAffinity: None
+    type: ClusterIP
+- apiVersion: v1
+  kind: Route
+  metadata:
+    annotations:
+      haproxy.router.openshift.io/hsts_header: max-age=31536000;includeSubDomains
+      haproxy.router.openshift.io/ip_whitelist: ${SENTRY_IP_WHITELIST}
+    labels:
+      run: sentry
+    name: sentry
+  spec:
+    host: ${SENTRY_HOSTNAME}
+    port:
+      targetPort: ${SENTRY_ROUTE_SERVICE_PORT}
+    tls:
+      insecureEdgeTerminationPolicy: Redirect
+      termination: edge
+    to:
+      kind: Service
+      name: ${SENTRY_ROUTE_SERVICE_NAME}
+      weight: 100
+    wildcardPolicy: None
+- apiVersion: v1
+  stringData:
+    sentry-secret-key: ${SENTRY_SECRET_KEY}
+    postgresql-database: ${POSTGRESQL_DATABASE}
+    postgresql-admin-user: postgres
+    postgresql-admin-password: ${POSTGRESQL_ADMIN_PASSWORD}
+    postgresql-user: ${POSTGRESQL_USER}
+    redis-password: ${REDIS_PASSWORD}
+    minio-access-key: ${MINIO_ACCESS_KEY}
+    minio-secret-key: ${MINIO_SECRET_KEY}
+    kc-discovery-url: ${KC_SERVER_URL}/realms/${KC_REALM}
+    kc-client-id: ${KC_CLIENT_ID}
+    kc-client-secret: ${KC_CLIENT_SECRET}
+  kind: Secret
+  metadata:
+    name: sentry
+  type: Opaque
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: sentry-populator
+  data:
+    sentry-populator.sh: |
+      #!/bin/bash
+      #
+      SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+      #
+      # Based on https://github.com/Its-Alex/sentry-docker-example/pull/3/files
+      # sentry-plugins is removed via EmptyDir due to missing permissions
+      # Wait for PostgreSQL and Redis
+      timeout 300 bash -c 'until : > /dev/tcp/postgresql/5432; do sleep 1; done'
+      timeout 300 bash -c 'until : > /dev/tcp/redis/6379; do sleep 1; done'
+      # Init migrations
+      sentry --version
+      sentry upgrade --noinput
+
+      sentry config set system.url-prefix https://${SENTRY_HOSTNAME}
+      sentry config set system.admin-email ${SENTRY_ADMIN_EMAIL}
+
+      "${SCRIPT_DIR}"/sentry-bootstrap.py
+    sentry-bootstrap.py: |
+      #!/usr/bin/env python
+
+      import traceback
+
+      # Bootstrap the Sentry environment, based on https://docs.sentry.io/server/faq/
+      from sentry.utils.runner import configure
+      configure()
+
+      from sentry.models import (
+          Team, Project, ProjectKey, User, Organization, OrganizationMember,
+          OrganizationMemberTeam
+      )
+
+      organization = Organization.objects.filter(name='${SENTRY_INITIAL_ORGANIZATION}').first()
+      if not organization:
+          organization = Organization()
+          organization.name = '${SENTRY_INITIAL_ORGANIZATION}'
+          organization.save()
+
+      if '${SENTRY_INITIAL_ORGANIZATION}' != 'Sentry':
+          try:
+              Organization.objects.filter(name='Sentry').delete()
+          except Exception:
+              traceback.print_exc()
+
+      team = Team.objects.filter(name='${SENTRY_INITIAL_TEAM}').first()
+      if not team:
+          team = Team()
+          team.name = '${SENTRY_INITIAL_TEAM}'
+          team.organization = organization
+          team.save()
+
+      project = Project.objects.filter(name='Default').first()
+      if not project:
+          project = Project()
+          project.team = team
+          project.add_team(team)
+          project.name = 'Default'
+          project.organization = organization
+          project.save()
+
+      user = User.objects.filter(username='admin').first()
+      if not user:
+          user = User()
+          user.username = 'admin'
+          user.email = '${SENTRY_ADMIN_EMAIL}'
+          user.is_superuser = True
+          user.set_password('${SENTRY_ADMIN_PASSWORD}')
+          user.save()
+
+      member = OrganizationMember.objects.filter(organization=organization,user=user).first()
+      if not member:
+          member = OrganizationMember.objects.create(
+              organization=organization,
+              user=user,
+              role='owner',
+          )
+
+      if not OrganizationMemberTeam.objects.filter(organizationmember=member,team=team).exists():
+        OrganizationMemberTeam.objects.create(
+            organizationmember=member,
+            team=team,
+        )
+
+      key = ProjectKey.objects.filter(project=project)[0]
+      print 'SENTRY_DSN = \"%s\"' % (key.get_dsn(),)
+- apiVersion: extensions/v1beta1
+  kind: NetworkPolicy
+  metadata:
+    name: allow-from-labeled-namespaces
+  spec:
+    ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            access-${NAMESPACE}: "true"
+    podSelector: {}
+    policyTypes:
+    - Ingress

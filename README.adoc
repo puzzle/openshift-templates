@@ -1,0 +1,67 @@
+=== Installation
+
+Variable für die zu installierende Bereitstellungsumgebung (Stage) definieren, wird in den folgenden Kommandos verwendet:
+[source,bash]
+STAGE=<vagrant | integration | production>
+
+Umgebungsabhängige Shell Variablen einlesen welche für die folgende Installation benötigt werden.
+[source,bash]
+. env/sentry-${STAGE}.env
+
+Falls für die zu installierende Bereitsstellungsumgebung noch keine ENV-Datei existiert, muss diese zuerst wie in Abschnitt <<_neue_bereitsstellungsumgebung_konfigurieren>> beschrieben erstellt und anschliessend eingelesen werden.
+
+OpenShift Projekte für Sentry erzeugen:
+[source,bash]
+oc new-project ${BUILD_NAMESPACE}
+oc new-project ${NAMESPACE}
+
+Sentry Image bauen:
+[source,bash]
+oc process -f template/sentry-build.yaml --param-file=env/sentry-${STAGE}.env --ignore-unknown-parameters | oc apply -n ${BUILD_NAMESPACE} -f -
+oc logs -n ${BUILD_NAMESPACE} -f bc/sentry-oauth
+
+=== PostgreSQL installieren
+
+Installieren von PostgreSQL:
+[source,bash]
+oc process -f template/postgresql-persistent.yaml --param-file=env/sentry-${STAGE}.env --ignore-unknown-parameters | oc apply -n ${NAMESPACE} -f -
+
+=== Redis installieren
+
+Installieren von Redis:
+[source,bash]
+oc process -f template/redis-ephemeral.yaml --param-file=env/sentry-${STAGE}.env --ignore-unknown-parameters | oc apply -n ${NAMESPACE} -f -
+
+=== Minio installieren
+
+Installieren von Minio:
+[source,bash]
+oc process -f template/minio.yaml --param-file=env/sentry-${STAGE}.env --ignore-unknown-parameters | oc apply -n ${NAMESPACE} -f -
+
+=== Sentry installieren
+
+Das Sentry Template installiert auch einen OpenShift Cron Job der regelmässig alte Daten (standardmässig älter als 30 Tage) löscht.
+Die Aufbewahrungszeit kann über die Variable `SENTRY_CLEANUP_DAYS` in der ENV-Datei konfiguriert werden.
+Ausführungszeit und Frequenz des Jobs können über die Variable `SENTRY_CLEANUP_SCHEDULE` konfiguriert werden.
+
+Installieren von Sentry:
+[source,bash]
+oc tag ${BUILD_NAMESPACE}/sentry-oauth:web ${NAMESPACE}/sentry-oauth:web
+oc process -f template/sentry.yaml --param-file=env/sentry-${STAGE}.env --ignore-unknown-parameters | oc apply -n ${NAMESPACE} -f -
+
+=== Neue Bereitsstellungsumgebung konfigurieren
+
+Mit Hilfe des `new-sentry-env.sh` Skripts kann eine neue ENV-Datei für Sentry erstellt werden:
+[source,bash]
+bin/new-sentry-env.sh >env/sentry-${NEW_STAGE}.env
+
+Die so erzeugte ENV-Datei enthält Zufallswerte für alle Passwörter und Schlüssel. Alle anderen Werte sind leer.
+Alternativ können Werte von einer bestehenden ENV-Datei übernommen werden:
+[source,bash]
+. env/sentry-${EXISTING_STAGE}.env
+. bin/new-sentry-env.sh >env/sentry-${NEW_STAGE}.env
+
+Alle Passwörter und Schlüssel in der erzeugten ENV-Datei enthalten neue Zufallswerte, während die anderen Werte
+aus den entsprechenden Variablen der aktuellen Shell übernommen werden.
+
+Nach Anpassen der neuen ENV-Datei muss diese eingecheckt werden, damit sie bei Updates zur Verfügung steht.

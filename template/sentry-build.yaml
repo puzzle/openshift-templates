@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: sentry
+parameters:
+- description: Whether to import new images automatically.
+  name: SCHEDULE_IMAGE_IMPORTS
+  value: 'false'
+- description: Sentry version to install.
+  name: SENTRY_VERSION
+  value: 9.1.2
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    labels:
+      app: sentry
+    name: sentry
+  spec:
+    lookupPolicy:
+      local: false
+    tags:
+    - annotations:
+        openshift.io/imported-from: sentry:${SENTRY_VERSION}
+      from:
+        kind: DockerImage
+        name: sentry:${SENTRY_VERSION}
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    labels:
+      app: sentry
+    name: sentry-oauth
+  spec:
+    lookupPolicy:
+      local: true
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    name: sentry-oauth
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: sentry-oauth:web
+    postCommit: {}
+    resources: {}
+    runPolicy: Serial
+    source:
+      dockerfile: |
+        FROM sentry:latest
+
+        RUN pip install 'sentry-auth-oidc<3.0.0' && pip install --upgrade requests && \
+            echo "# OpenIDconnect" >>/etc/sentry/sentry.conf.py && \
+            echo "OIDC_CLIENT_ID = env('SENTRY_OIDC_CLIENT_ID')" >>/etc/sentry/sentry.conf.py && \
+            echo "OIDC_CLIENT_SECRET = env('SENTRY_OIDC_CLIENT_SECRET')" >>/etc/sentry/sentry.conf.py && \
+            echo "OIDC_SCOPE = env('SENTRY_OIDC_SCOPE') or 'openid email'" >>/etc/sentry/sentry.conf.py && \
+            echo "OIDC_DOMAIN = env('SENTRY_OIDC_DOMAIN')" >>/etc/sentry/sentry.conf.py && \
+            # \
+            #  Fix https://github.com/getsentry/sentry/issues/12832 which hasn't been released yet. \
+            apt-get update && \
+            apt-get install -y curl patch && \
+            cd /usr/local/lib/python2.7/site-packages/sentry && \
+            curl https://github.com/getsentry/sentry/commit/3aeb9bd5f8cc51f1f34886ee841436e4f6ed37d8.patch | \
+            patch -p3 && \
+            apt-get purge -y patch curl && \
+            apt-get autoremove --purge -y && \
+            apt-get clean -y
+      type: Dockerfile
+    strategy:
+      dockerStrategy:
+        from:
+          kind: ImageStreamTag
+          name: sentry:latest
+      type: Docker
+    triggers:
+    - type: ImageChange
