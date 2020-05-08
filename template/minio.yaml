@@ -155,3 +155,11 @@ parameters:
   name: MINIO_VOLUME_CAPACITY
   required: true
   value: 1Gi
+- description: Minio access key.
+  displayName: Minio Access Key
+  name: MINIO_ACCESS_KEY
+  required: true
+- description: Minio secret key.
+  displayName: Minio Secret Key
+  name: MINIO_SECRET_KEY
+  required: true
