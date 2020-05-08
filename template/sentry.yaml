@@ -124,6 +124,8 @@ objects:
             value: ${SENTRY_EMAIL_HOST}
           - name: SENTRY_SERVER_EMAIL
             value: ${SENTRY_SERVER_EMAIL}
+          - name: SENTRY_FILESTORE_BACKEND
+            value: s3
           - name: SENTRY_FILE_ACCESS
             valueFrom:
               secretKeyRef:
@@ -239,9 +241,11 @@ objects:
           - name: SENTRY_USE_SSL
             value: "true"
           - name: SENTRY_EMAIL_HOST
-            value: smtp.company.com
+            value: ${SENTRY_EMAIL_HOST}
           - name: SENTRY_SERVER_EMAIL
-            value: noreply@company.com
+            value: ${SENTRY_SERVER_EMAIL}
+          - name: SENTRY_FILESTORE_BACKEND
+            value: s3
           - name: SENTRY_FILE_ACCESS
             valueFrom:
               secretKeyRef:
@@ -311,7 +315,7 @@ objects:
           resources:
             limits:
               # also applies to populator which needs lots of memory
-              cpu: 2
+              cpu: '2'
               memory: 3Gi
             requests:
               cpu: 500m
@@ -377,6 +381,8 @@ objects:
             value: postgresql
           - name: SENTRY_SERVER_EMAIL
             value: ${SENTRY_SERVER_EMAIL}
+          - name: SENTRY_FILESTORE_BACKEND
+            value: s3
           - name: SENTRY_FILE_ACCESS
             valueFrom:
               secretKeyRef:
@@ -479,6 +485,8 @@ objects:
                 value: ${SENTRY_EMAIL_HOST}
               - name: SENTRY_SERVER_EMAIL
                 value: ${SENTRY_SERVER_EMAIL}
+              - name: SENTRY_FILESTORE_BACKEND
+                value: s3
               - name: SENTRY_FILE_ACCESS
                 valueFrom:
                   secretKeyRef:
