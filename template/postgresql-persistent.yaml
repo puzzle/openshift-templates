@@ -43,10 +43,10 @@ objects:
       local: false
     tags:
     - annotations:
-        openshift.io/imported-from: registry.access.redhat.com/rhscl/postgresql-10-rhel7:latest
+        openshift.io/imported-from: ${POSTGRESQL_IMAGE}
       from:
         kind: DockerImage
-        name: registry.access.redhat.com/rhscl/postgresql-10-rhel7:latest
+        name: ${POSTGRESQL_IMAGE}
       importPolicy:
         scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
       name: latest
@@ -88,6 +88,7 @@ objects:
   metadata:
     name: ${POSTGRESQL_SERVICE_NAME}
   spec:
+    storageClassName: ${POSTGRESQL_STORAGE_CLASS}
     accessModes:
     - ReadWriteOnce
     resources:
@@ -181,6 +182,11 @@ objects:
       type: ImageChange
     - type: ConfigChange
 parameters:
+- description: PostgreSQL container image. Defaults to 'registry.access.redhat.com/rhscl/postgresql-10-rhel7:latest'.
+  displayName: PostgreSQL Image
+  name: POSTGRESQL_IMAGE
+  required: true
+  value: registry.access.redhat.com/rhscl/postgresql-10-rhel7:latest
 - description: Minimum amount of memory the container needs to start and reserves on the cluster.
   displayName: Memory Request
   name: POSTGRESQL_MEMORY_REQUEST
@@ -217,6 +223,9 @@ parameters:
   name: POSTGRESQL_DATABASE
   required: true
   value: sampledb
+- description: Postgresql storage claim selector. Defaults to null.
+  name: POSTGRESQL_STORAGE_CLASS
+  value: 'null'
 - description: Volume space available for data, e.g. 512Mi, 2Gi.
   displayName: Volume Capacity
   name: POSTGRESQL_VOLUME_CAPACITY
