@@ -56,11 +56,21 @@ objects:
         FROM sentry:latest
 
         RUN pip install 'sentry-auth-oidc<3.0.0' && pip install --upgrade requests && \
-            echo "# OpenIDconnect" >>/etc/sentry/sentry.conf.py && \
-            echo "OIDC_CLIENT_ID = env('SENTRY_OIDC_CLIENT_ID')" >>/etc/sentry/sentry.conf.py && \
-            echo "OIDC_CLIENT_SECRET = env('SENTRY_OIDC_CLIENT_SECRET')" >>/etc/sentry/sentry.conf.py && \
-            echo "OIDC_SCOPE = env('SENTRY_OIDC_SCOPE') or 'openid email'" >>/etc/sentry/sentry.conf.py && \
-            echo "OIDC_DOMAIN = env('SENTRY_OIDC_DOMAIN')" >>/etc/sentry/sentry.conf.py && \
+            echo " \
+            \nSENTRY_OPTIONS['filestore.backend'] = env('SENTRY_FILESTORE_BACKEND') \
+            \nSENTRY_OPTIONS['filestore.options'] = { \
+            \n  'location': env('SENTRY_FILESTORE_DIR'), \
+            \n  'endpoint_url': env('SENTRY_FILE_HOST'), \
+            \n  'bucket_name': env('SENTRY_FILE_BUCKET'), \
+            \n  'access_key': env('SENTRY_FILE_ACCESS'), \
+            \n  'secret_key': env('SENTRY_FILE_SECRET') \
+            \n} \
+            \n\
+            \n# OpenIDconnect \
+            \nOIDC_CLIENT_ID = env('SENTRY_OIDC_CLIENT_ID') \
+            \nOIDC_CLIENT_SECRET = env('SENTRY_OIDC_CLIENT_SECRET') \
+            \nOIDC_SCOPE = env('SENTRY_OIDC_SCOPE') or 'openid email' \
+            \nOIDC_DOMAIN = env('SENTRY_OIDC_DOMAIN')" >>/etc/sentry/sentry.conf.py && \
             # \
             #  Fix https://github.com/getsentry/sentry/issues/12832 which hasn't been released yet. \
             apt-get update && \
