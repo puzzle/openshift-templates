@@ -1,0 +1,285 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: alertmanager
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: ose-configmap-reloader
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/ose-configmap-reloader:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: alertmanager
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/prometheus-alertmanager:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: alertmanager-proxy
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/oauth-proxy:v3.11
+      generation: 1
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    annotations:
+      serviceaccounts.openshift.io/oauth-redirectreference.alertmanager-main: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"alertmanager-main"}}'
+    name: alertmanager-main
+- apiVersion: v1
+  stringData:
+    alertmanager.yaml: ${ALERTMANAGER_CONFIG}
+  kind: Secret
+  metadata:
+    labels:
+      k8s-app: alertmanager
+    name: alertmanager-main
+  type: Opaque
+- apiVersion: v1
+  stringData:
+    session_secret: ${ALERTMANAGER_SESSION_SECRET}
+  kind: Secret
+  metadata:
+    labels:
+      k8s-app: alertmanager
+    name: alertmanager-main-proxy
+  type: Opaque
+- apiVersion: v1
+  stringData:
+    auth: ${ALERTMANAGER_GRAFANA_PASSWORD_HTPASSWD}
+  kind: Secret
+  metadata:
+    labels:
+      app: alertmanager
+    name: alertmanager-main-htpasswd
+  type: Opaque
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      service.alpha.openshift.io/serving-cert-secret-name: alertmanager-main-tls
+    labels:
+      alertmanager: main
+    name: alertmanager-main
+  spec:
+    ports:
+    - name: web
+      port: 9094
+      protocol: TCP
+      targetPort: web
+    selector:
+      alertmanager: main
+      app: alertmanager
+    sessionAffinity: None
+    type: ClusterIP
+- apiVersion: v1
+  kind: Route
+  metadata:
+    annotations:
+      haproxy.router.openshift.io/hsts_header: max-age=31536000;includeSubDomains
+      haproxy.router.openshift.io/ip_whitelist: ${ALERTMANAGER_IP_WHITELIST}
+      openshift.io/host.generated: "true"
+      kubernetes.io/tls-acme: "true"
+    name: alertmanager-main
+  spec:
+    host: ${ALERTMANAGER_HOSTNAME}
+    port:
+      targetPort: web
+    tls:
+      termination: reencrypt
+      insecureEdgeTerminationPolicy: Redirect
+    to:
+      kind: Service
+      name: alertmanager-main
+      weight: 100
+    wildcardPolicy: None
+- apiVersion: monitoring.coreos.com/v1
+  kind: Alertmanager
+  metadata:
+    # annotations:
+      #alpha.image.policy.openshift.io/resolve-names: "*"
+      #image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"alertmanager:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"alertmanager\")].image"}]'
+      #image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"alertmanager:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"alertmanager\")].image"},{"from":{"kind":"ImageStreamTag","name":"alertmanager-proxy:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"alertmanager-proxy\")].image"},{"from":{"kind":"ImageStreamTag","name":"ose-configmap-reloader:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"config-reloader\")].image"}]'
+      #,{"from":{"kind":"ImageStreamTag","name":"ose-configmap-reloader:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"config-reloader\")].image"}]'
+    labels:
+      alertmanager: main
+    name: main
+  spec:
+    # podMetadata:
+    #   annotations:
+    #     alpha.image.policy.openshift.io/resolve-names: "*"
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+              - key: alertmanager
+                operator: In
+                values:
+                - main
+            namespaces:
+            - ${NAMESPACE}
+            topologyKey: kubernetes.io/hostname
+          weight: 100
+    baseImage: alertmanager
+    containers:
+    # - name: alertmanager-liveness-probe
+    #   image: registry.access.redhat.com/openshift3/ose-cli:v3.11
+    #   command:
+    #   - /bin/sh
+    #   - -c
+    #   - |
+    #     trap "exit 0" TERM INT
+    #     failed=0
+    #     while true; do
+    #       sleep 10
+    #       if oc exec -c alertmanager $HOSTNAME stat /alertmanager 2>&1 | grep -qi 'transport endpoint is not connected'; then
+    #         failed+=1
+    #         if [ $failed -ge 3 ]; then
+    #           failed=0
+    #           oc delete pod $HOSTNAME
+    #         fi
+    #       else
+    #         failed=0
+    #       fi
+    #     done
+    - args:
+      - -provider=openshift
+      - -https-address=:9094
+      - -http-address=
+      - -email-domain=*
+      - -upstream=http://localhost:9093
+      - -htpasswd-file=/etc/proxy/htpasswd/auth
+      - '-openshift-sar={"namespace":"${NAMESPACE}","resource":"services","name":"alertmanager-main","verb":"get"}'
+      - '-openshift-delegate-urls=${ALERTMANAGER_OAUTH_DELEGATE_URLS}'
+      - -tls-cert=/etc/tls/private/tls.crt
+      - -tls-key=/etc/tls/private/tls.key
+      - -client-secret-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+      - -cookie-secret-file=/etc/proxy/secrets/session_secret
+      - -openshift-service-account=alertmanager-main
+      - -openshift-ca=/etc/pki/tls/cert.pem
+      - -openshift-ca=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      - -skip-auth-regex=^/metrics
+      env:
+      - name: NAMESPACE
+        value: ${NAMESPACE}
+      - name: HTTP_PROXY
+      - name: HTTPS_PROXY
+      - name: NO_PROXY
+      image: alertmanager-proxy:latest
+      name: alertmanager-proxy
+      resources:
+        limits:
+          cpu: 250m
+          memory: 64Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi
+      ports:
+      - containerPort: 9094
+        name: web
+      volumeMounts:
+      - mountPath: /etc/tls/private
+        name: secret-alertmanager-main-tls
+      - mountPath: /etc/proxy/secrets
+        name: secret-alertmanager-main-proxy
+      - mountPath: /etc/proxy/htpasswd
+        name: secret-alertmanager-main-htpasswd
+    externalUrl: https://${ALERTMANAGER_HOSTNAME}/
+    listenLocal: true
+    nodeSelector: ${{ALERTMANAGER_NODE_SELECTOR}}
+    replicas: ${{ALERTMANAGER_REPLICAS}}
+    resources:
+      limits:
+        cpu: '1'
+        memory: 128Mi
+      requests:
+        cpu: 10m
+        memory: 64Mi
+    secrets:
+    - alertmanager-main-tls
+    - alertmanager-main-proxy
+    - alertmanager-main-htpasswd
+    securityContext: {}
+    serviceAccountName: alertmanager-main
+    storage:
+      resources: {}
+      volumeClaimTemplate:
+        metadata: {}
+        spec:
+          resources:
+            requests:
+              storage: ${ALERTMANAGER_STORAGE_SIZE}
+    version: v0.15.2
+    tag: latest
+parameters:
+- description: Namespace Alertmanager is deployed to.
+  name: NAMESPACE
+  required: true
+- description: Whether to import new images automatically.
+  name: SCHEDULE_IMAGE_IMPORTS
+  value: 'false'
+- description: 'IP whitelist for Alertmanager route.'
+  name: ALERTMANAGER_IP_WHITELIST
+- description: 'External hostname of the Alertmanager.'
+  name: ALERTMANAGER_HOSTNAME
+  required: true
+- description: JSON map configuring delegated authorization against OpenShift API.
+  name: ALERTMANAGER_OAUTH_DELEGATE_URLS
+  value: '{"/": {"namespace":"$(NAMESPACE)","resource":"services","name":"alertmanager-main","verb":"get"}}'
+- description: 'Node selector for Prometheus Operator in JSON. Defaults to ''{"node-role.kubernetes.io/infra": "true"}''.'
+  name: ALERTMANAGER_NODE_SELECTOR
+  value: '{"node-role.kubernetes.io/infra": "true"}'
+- description: Session secret used for Alertmanager session signing
+  displayName: Alertmanager Session Secret
+  name: ALERTMANAGER_SESSION_SECRET
+  required: true
+- description: Basic auth password for Grafana in htpasswd format.
+  displayName: Alertmanager Grafana Password Htpasswd
+  name: ALERTMANAGER_GRAFANA_PASSWORD_HTPASSWD
+  required: true
+- description: Alertmanager persistence volume size. Defaults to 1Gi.
+  name: ALERTMANAGER_STORAGE_SIZE
+  value: 1Gi
+- description: Number of Alertmanager instances to run.
+  name: ALERTMANAGER_REPLICAS
+  value: '2'
+- description: Alertmanager Configuration.
+  name: ALERTMANAGER_CONFIG
+  value: '{"global":{"resolve_timeout":"5m"},"route":{"group_wait":"30s","group_interval":"5m","group_by":["alertname"],"repeat_interval":"12h","receiver":"default","routes":[{"match":{"alertname":"DeadMansSwitch"},"repeat_interval":"5m","receiver":"deadmansswitch"}]},"receivers":[{"name":"default"},{"name":"deadmansswitch"}]}'

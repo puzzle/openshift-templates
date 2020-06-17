@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: prometheus-servicemonitor
+objects:
+- apiVersion: monitoring.coreos.com/v1
+  kind: ServiceMonitor
+  metadata:
+    labels:
+      app: prometheus
+      prometheus: ${PROMETHEUS_ID}
+    name: prometheus-apps
+  spec:
+    endpoints:
+    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      interval: 30s
+      port: web
+      scheme: https
+      targetPort: 0
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+        serverName: prometheus-apps.${NAMESPACE}.svc
+      relabelings:
+      - action: replace
+        replacement: $1--$2:$3
+        sourceLabels:
+        - namespace
+        - pod
+        - __address__
+        separator: ;
+        regex: ([^;]+);([^;]+);[^:]+:(.+)
+        targetLabel: instance
+    namespaceSelector: {}
+    selector:
+      matchLabels:
+        prometheus: apps
+- apiVersion: monitoring.coreos.com/v1
+  kind: ServiceMonitor
+  metadata:
+    labels:
+      app: alertmanager
+      prometheus: ${PROMETHEUS_ID}
+    name: alertmanager
+  spec:
+    endpoints:
+    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      interval: 30s
+      port: web
+      scheme: https
+      targetPort: 0
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+        serverName: alertmanager-main.${NAMESPACE}.svc
+      relabelings:
+      - action: replace
+        replacement: $1--$2:$3
+        sourceLabels:
+        - namespace
+        - pod
+        - __address__
+        separator: ;
+        regex: ([^;]+);([^;]+);[^:]+:(.+)
+        targetLabel: instance
+    namespaceSelector: {}
+    selector:
+      matchLabels:
+        alertmanager: main
+parameters:
+- description: Namespace Prometheus is deployed to.
+  name: NAMESPACE
+  required: true
+- description: ID of Prometheus instance this ServiceMonitor configures. Defaults to 'apps'.
+  name: PROMETHEUS_ID
+  value: apps

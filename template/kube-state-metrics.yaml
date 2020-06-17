@@ -1,0 +1,200 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: kube-state-metrics
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: ose-kube-state-metrics
+  spec:
+    lookupPolicy:
+      local: false
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/ose-kube-state-metrics:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    labels:
+      k8s-app: kube-state-metrics
+    name: kube-state-metrics
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      k8s-app: kube-state-metrics
+    name: kube-state-metrics
+  spec:
+    clusterIP: None
+    ports:
+    - name: http-main
+      port: 8081
+      protocol: TCP
+      targetPort: http-main
+    - name: http-self
+      port: 8082
+      protocol: TCP
+      targetPort: http-self
+    selector:
+      k8s-app: kube-state-metrics
+    sessionAffinity: None
+    type: ClusterIP
+- apiVersion: v1
+  kind: RoleBinding
+  metadata:
+    name: view:kube-state-metrics
+  roleRef:
+    name: view
+  subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: ${NAMESPACE}
+- apiVersion: extensions/v1beta1
+  kind: Deployment
+  metadata:
+    annotations:
+      image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"ose-kube-state-metrics:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"kube-state-metrics\")].image"}]'
+    labels:
+      k8s-app: kube-state-metrics
+    name: kube-state-metrics
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        k8s-app: kube-state-metrics
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        labels:
+          k8s-app: kube-state-metrics
+      spec:
+        containers:
+        - args:
+          - --host=0.0.0.0
+          - --port=8081
+          - --telemetry-host=0.0.0.0
+          - --telemetry-port=8082
+          - --collectors=pods,endpoints,jobs,cronjobs
+          - --namespace=${PROMETHEUS_OPERATOR_NAMESPACES},${KUBE_STATE_METRICS_NAMESPACES}
+          image: ose-kube-state-metrics:latest
+          imagePullPolicy: IfNotPresent
+          name: kube-state-metrics
+          ports:
+          - containerPort: 8081
+            name: http-main
+            protocol: TCP
+          - containerPort: 8082
+            name: http-self
+            protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /tmp
+            name: volume-directive-shadow
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        serviceAccount: kube-state-metrics
+        serviceAccountName: kube-state-metrics
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - emptyDir: {}
+          name: volume-directive-shadow
+- apiVersion: monitoring.coreos.com/v1
+  kind: ServiceMonitor
+  metadata:
+    labels:
+      k8s-app: kube-state-metrics
+      prometheus: ${PROMETHEUS_ID}
+    name: kube-state-metrics
+  spec:
+    endpoints:
+    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      honorLabels: true
+      interval: 2m
+      port: http-main
+      scheme: http
+      scrapeTimeout: 2m
+      targetPort: 0
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+        serverName: kube-state-metrics.openshift-monitoring.svc
+      relabelings:
+      - action: replace
+        replacement: $1--$2:$3
+        sourceLabels:
+        - namespace
+        - pod
+        - __address__
+        separator: ;
+        regex: ([^;]+);([^;]+);[^:]+:(.+)
+        targetLabel: instance
+      metricRelabelings:
+      - action: replace
+        sourceLabels: [pod, container]
+        separator: ;
+        regex: (.+);(.+)
+        targetLabel: pod_container
+        replacement: $1/$2
+    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      interval: 2m
+      port: http-self
+      scheme: http
+      scrapeTimeout: 2m
+      targetPort: 0
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+        serverName: kube-state-metrics.openshift-monitoring.svc
+      relabelings:
+      - action: replace
+        replacement: $1--$2:$3
+        sourceLabels:
+        - namespace
+        - pod
+        - __address__
+        separator: ;
+        regex: ([^;]+);([^;]+);[^:]+:(.+)
+        targetLabel: instance
+    jobLabel: k8s-app
+    namespaceSelector: {}
+    selector:
+      matchLabels:
+        k8s-app: kube-state-metrics
+parameters:
+- description: Namespace Prometheus is deployed to.
+  name: NAMESPACE
+  required: true
+- description: Whether to import new images automatically.
+  name: SCHEDULE_IMAGE_IMPORTS
+  value: 'false'
+- description: ID of Prometheus instance, is used in label keys and must be unique on cluster. Defaults to 'apps'.
+  name: PROMETHEUS_ID
+  value: apps
+- description: Namespaces the Prometheus Operator is watching and are also watched by kube-state-metrics (comma separated).
+  name: PROMETHEUS_OPERATOR_NAMESPACES
+  required: true
+- description: Additional namespaces only watched by kube-state-metrics (comma separated).
+  name: KUBE_STATE_METRICS_NAMESPACES
+  value: ''

@@ -1,0 +1,499 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: grafana
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: grafana
+  spec:
+    lookupPolicy:
+      local: false
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/grafana:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: grafana-proxy-base
+  spec:
+    lookupPolicy:
+      local: false  # Image Stream is resolved by annotation in Grafana deployment
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/rhel7:latest
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: grafana-proxy
+  spec:
+    lookupPolicy:
+      local: false
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    labels:
+      app: grafana
+    name: grafana-proxy
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: grafana-proxy:latest
+    postCommit: {}
+    resources: {}
+    runPolicy: Serial
+    source:
+      git:
+        uri: "${KEYCLOAK_GATEKEEPER_GIT_URL}"
+        ref: "${KEYCLOAK_GATEKEEPER_VERSION}"
+      dockerfile: |-
+        FROM registry.access.redhat.com/rhel7:latest
+
+        ENV GOPATH=/go PATH=${PATH}:/go/bin GO111MODULE=on
+
+        COPY . $GOPATH/src/github.com/keycloak/keycloak-gatekeeper
+
+        RUN set -eo pipefail \
+          && rpm --import https://mirror.go-repo.io/centos/RPM-GPG-KEY-GO-REPO \
+          && curl -s https://mirror.go-repo.io/centos/go-repo.repo -o /etc/yum.repos.d/go-repo.repo \
+          && yum install -y golang make git \
+          && cd $GOPATH/src/github.com/keycloak/keycloak-gatekeeper \
+          # && make dep-install \
+          && make build \
+          && cp $GOPATH/src/github.com/keycloak/keycloak-gatekeeper/bin/keycloak-gatekeeper /usr/bin/ \
+          && rm -rf /go \
+          && yum erase -y golang make \
+          && yum clean all
+
+        # doesn't require a root user.
+        USER 1001
+
+        ENTRYPOINT ["/usr/bin/keycloak-gatekeeper"]
+      type: Git
+    strategy:
+      dockerStrategy:
+        from:
+          kind: ImageStreamTag
+          name: grafana-proxy-base:latest
+      type: Docker
+    triggers:
+    - imageChange: {}
+      type: ImageChange
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: grafana
+    labels:
+      app: grafana
+- apiVersion: v1
+  stringData:
+    grafana.ini: |
+      [users]
+      allow_sign_up = false
+      auto_assign_org = true
+      auto_assign_org_role = Admin
+      [auth]
+      disable_login_form = true
+      disable_signout_menu = true
+      [auth.basic]
+      enabled = false
+      [auth.proxy]
+      auto_sign_up = true
+      enabled = true
+      header_name = X-Auth-Username
+      [paths]
+      data = /var/lib/grafana
+      logs = /var/lib/grafana/logs
+      plugins = /var/lib/grafana/plugins
+      provisioning = /etc/grafana/provisioning
+      [server]
+      http_addr = 127.0.0.1
+      http_port = 3001
+  kind: Secret
+  metadata:
+    name: grafana-config
+    labels:
+      app: grafana
+  type: Opaque
+- apiVersion: v1
+  data:
+    dashboards.yaml: |-
+      {
+          "apiVersion": 1,
+          "providers": [
+              {
+                  "folder": "",
+                  "name": "0",
+                  "options": {
+                      "path": "/grafana-dashboard-definitions/0"
+                  },
+                  "orgId": 1,
+                  "type": "file"
+              }
+          ]
+      }
+  kind: ConfigMap
+  metadata:
+    name: grafana-dashboards
+    labels:
+      app: grafana
+- apiVersion: v1
+  stringData:
+    prometheus.yaml: |
+      apiVersion: 1
+      datasources:
+      - access: proxy
+        basicAuth: true
+        basicAuthPassword: '${PROMETHEUS_GRAFANA_PASSWORD}'
+        basicAuthUser: internal
+        editable: false
+        jsonData:
+            tlsSkipVerify: true
+        name: prometheus
+        orgId: 1
+        type: prometheus
+        url: 'https://prometheus-apps.${NAMESPACE}.svc:9091'
+      - access: proxy
+        basicAuth: true
+        basicAuthPassword: '${PROMETHEUS_GRAFANA_OPENSHIFT_MONITORING_PASSWORD}'
+        basicAuthUser: internal
+        editable: false
+        name: prometheus-openshift
+        orgId: 1
+        type: prometheus
+        url: '${PROMETHEUS_OPENSHIFT_MONITORING_ENDPOINT}'
+      - name: "Prometheus AlertManager"
+        type: "camptocamp-prometheus-alertmanager-datasource"
+        access: "proxy"
+        url: "https://alertmanager-main.${NAMESPACE}.svc:9094"
+        basicAuth: true
+        basicAuthPassword: '${ALERTMANAGER_GRAFANA_PASSWORD}'
+        basicAuthUser: internal
+        editable: false
+        jsonData:
+          tlsSkipVerify: true
+          severity_critical: critical
+          severity_warning: warning
+  kind: Secret
+  metadata:
+    labels:
+      app: grafana
+    name: grafana-datasources
+  type: Opaque
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    labels:
+      app: grafana
+    name: grafana-proxy
+  type: Opaque
+  stringData:
+    KC_REALM: ${KC_REALM}
+    KC_SERVER_URL: ${KC_SERVER_URL}
+    KC_CLIENT_ID: ${KC_CLIENT_ID}
+    KC_CLIENT_SECRET: ${KC_CLIENT_SECRET}
+    KC_ENCRYPTION_KEY: ${KC_ENCRYPTION_KEY}
+    KC_RESOURCES: ${KC_RESOURCES}
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      service.alpha.openshift.io/serving-cert-secret-name: grafana-tls
+    name: grafana
+    labels:
+      app: grafana
+  spec:
+    ports:
+    - name: https
+      port: 8080
+      protocol: TCP
+      targetPort: https
+    selector:
+      app: grafana
+    sessionAffinity: None
+    type: ClusterIP
+- apiVersion: v1
+  kind: Route
+  metadata:
+    annotations:
+      haproxy.router.openshift.io/hsts_header: max-age=31536000;includeSubDomains
+      haproxy.router.openshift.io/ip_whitelist: ${GRAFANA_IP_WHITELIST}
+      openshift.io/host.generated: "true"
+      kubernetes.io/tls-acme: "true"
+    name: grafana
+    labels:
+      app: grafana
+  spec:
+    host: ${GRAFANA_HOSTNAME}
+    port:
+      targetPort: ${GRAFANA_ROUTE_SERVICE_PORT}
+    tls:
+      termination: ${GRAFANA_ROUTE_TLS_TERMINATION}
+      insecureEdgeTerminationPolicy: Redirect
+    to:
+      kind: Service
+      name: ${GRAFANA_ROUTE_SERVICE_NAME}
+      weight: 100
+    wildcardPolicy: None
+- apiVersion: extensions/v1beta1
+  kind: Deployment
+  metadata:
+    annotations:
+      alpha.image.policy.openshift.io/resolve-names: '*'
+      image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"grafana:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"grafana\")].image"},{"from":{"kind":"ImageStreamTag","name":"grafana-proxy:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"grafana-proxy\")].image"}]'
+    labels:
+      app: grafana
+    name: grafana
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 3
+    selector:
+      matchLabels:
+        app: grafana
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        labels:
+          app: grafana
+      spec:
+        initContainers:
+        - command:
+          - /bin/sh
+          - -xc
+          - for plugin in ${GRAFANA_PLUGINS}; do /go/src/github.com/grafana/grafana/bin/linux-amd64/grafana-cli plugins install ${plugin}; done
+          image: grafana:latest
+          imagePullPolicy: IfNotPresent
+          name: grafana-init
+          ports:
+          - containerPort: 3001
+            name: http
+            protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /var/lib/grafana
+            name: grafana-storage
+          - mountPath: /etc/grafana
+            name: grafana-config
+          - mountPath: /grafana-dashboard-definitions/0
+            name: grafana-dashboards-dir
+        containers:
+        - args:
+          - -config=/etc/grafana/grafana.ini
+          image: grafana:latest
+          imagePullPolicy: IfNotPresent
+          name: grafana
+          ports:
+          - containerPort: 3001
+            name: http
+            protocol: TCP
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /var/lib/grafana
+            name: grafana-storage
+          - mountPath: /etc/grafana/provisioning/datasources
+            name: grafana-datasources
+          - mountPath: /etc/grafana/provisioning/dashboards
+            name: grafana-dashboards
+          - mountPath: /etc/grafana
+            name: grafana-config
+          - mountPath: /grafana-dashboard-definitions/0
+            name: grafana-dashboards-dir
+        - name: grafana-proxy
+          image: grafana-proxy:latest
+          env:
+          - name: KC_SERVER_URL
+            valueFrom:
+              secretKeyRef:
+                name: grafana-proxy
+                key: KC_SERVER_URL
+          - name: KC_REALM
+            valueFrom:
+              secretKeyRef:
+                name: grafana-proxy
+                key: KC_REALM
+          - name: KC_RESOURCES
+            valueFrom:
+              secretKeyRef:
+                name: grafana-proxy
+                key: KC_RESOURCES
+          - name: PROXY_CLIENT_ID
+            valueFrom:
+              secretKeyRef:
+                name: grafana-proxy
+                key: KC_CLIENT_ID
+          - name: PROXY_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: grafana-proxy
+                key: KC_CLIENT_SECRET
+          - name: PROXY_ENCRYPTION_KEY
+            valueFrom:
+              secretKeyRef:
+                name: grafana-proxy
+                key: KC_ENCRYPTION_KEY
+          args:
+          - --listen=0.0.0.0:8080
+          - --enable-encrypted-token=${GRAFANA_ENABLE_ENCRYPTED_TOKEN}
+          - --enable-refresh-tokens
+          - --upstream-url=http://localhost:3001
+          - --resources=$(KC_RESOURCES)
+          - --discovery-url=$(KC_SERVER_URL)/realms/$(KC_REALM)
+          - --tls-cert=/etc/tls/private/tls.crt
+          - --tls-private-key=/etc/tls/private/tls.key
+          - --enable-authorization-header=false
+          ports:
+          - containerPort: 8080
+            name: https
+            protocol: TCP
+          resources:
+            limits:
+              cpu: 250m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          readinessProbe:
+            httpGet:
+              path: "/oauth/health"
+              port: 8080
+              scheme: HTTPS
+          volumeMounts:
+          - mountPath: /etc/tls/private
+            name: secret-grafana-tls
+        dnsPolicy: ClusterFirst
+        nodeSelector: ${{GRAFANA_NODE_SELECTOR}}
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        serviceAccount: grafana
+        serviceAccountName: grafana
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - name: grafana-datasources
+          secret:
+            defaultMode: 420
+            secretName: grafana-datasources
+        - configMap:
+            defaultMode: 420
+            name: grafana-dashboards
+          name: grafana-dashboards
+        - name: grafana-config
+          secret:
+            defaultMode: 420
+            secretName: grafana-config
+        - name: secret-grafana-tls
+          secret:
+            defaultMode: 420
+            secretName: grafana-tls
+        - name: secret-grafana-proxy
+          secret:
+            defaultMode: 420
+            secretName: grafana-proxy
+        - name: grafana-storage
+          ${GRAFANA_VOLUME_TYPE}: ${{GRAFANA_VOLUME_CONFIG}}
+        - name: grafana-dashboards-dir
+          emptyDir: {}
+parameters:
+- description: Namespace Grafana is deployed to.
+  name: NAMESPACE
+  required: true
+- description: Whether to import new images automatically.
+  name: SCHEDULE_IMAGE_IMPORTS
+  value: 'null'
+- description: Grafana Plugins to install.
+  name: GRAFANA_PLUGINS
+  value: ''
+- description: 'External hostname of Grafana.'
+  name: GRAFANA_HOSTNAME
+- description: Name of the service that the Grafana route is exposing, e.g. to interpose a WAF. Defaults to 'grafana'.
+  name: GRAFANA_ROUTE_SERVICE_NAME
+  value: grafana
+- description: Port of the service that the Grafana route is exposing, e.g. to interpose a WAF. Defaults to 'https'.
+  name: GRAFANA_ROUTE_SERVICE_PORT
+  value: https
+- description: TLS termination mode of the service that the Grafana route is exposing, e.g. to interpose a WAF. Defaults to 'reencrypt'.
+  name: GRAFANA_ROUTE_TLS_TERMINATION
+  value: reencrypt
+- description: 'IP whitelist for Grafana route.'
+  name: GRAFANA_IP_WHITELIST
+- description: 'Enable encryption of access tokens in Grafana Keycloak Gatekeeper.'
+  name: GRAFANA_ENABLE_ENCRYPTED_TOKEN
+  value: "true"
+- description: 'Node selector for Prometheus in JSON. Defaults to ''{"node-role.kubernetes.io/infra": "true"}''.'
+  name: GRAFANA_NODE_SELECTOR
+  value: '{"node-role.kubernetes.io/infra": "true"}'
+- description: Basic auth password for Grafana in Prometheus.
+  displayName: Prometheus Grafana Password
+  name: PROMETHEUS_GRAFANA_PASSWORD
+  required: true
+- description: Basic auth password for Grafana in Openshift-Prometheus.
+  displayName: OpenShift-Prometheus Grafana Password
+  name: PROMETHEUS_GRAFANA_OPENSHIFT_MONITORING_PASSWORD
+  required: true
+- description: Endpoint URL of Openshift-Prometheus.
+  displayName: Endpoint of OpenShift-Prometheus
+  name: PROMETHEUS_OPENSHIFT_MONITORING_ENDPOINT
+  required: true
+- description: Basic auth password for Grafana in Alertmanager.
+  displayName: Alertmanager Grafana Password
+  name: ALERTMANAGER_GRAFANA_PASSWORD
+  required: true
+- name: KC_SERVER_URL
+  required: true
+- name: KC_REALM
+  required: true
+- name: KC_CLIENT_ID
+  required: true
+- name: KC_CLIENT_SECRET
+  required: true
+- name: KC_ENCRYPTION_KEY
+  required: true
+- name: KC_RESOURCES
+  value: uri=/*
+- name: KEYCLOAK_GATEKEEPER_GIT_URL
+  value: https://github.com/keycloak/keycloak-gatekeeper
+- name: KEYCLOAK_GATEKEEPER_VERSION
+  value: 6.0.1
+- name: GRAFANA_VOLUME_TYPE
+  value: emptyDir
+- name: GRAFANA_VOLUME_CONFIG
+  value: '{}'

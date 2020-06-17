@@ -1,0 +1,269 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: prometheus-operator
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: prometheus-operator-base
+  spec:
+    lookupPolicy:
+      local: false
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/rhel7:latest
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: prometheus-operator
+  spec:
+    lookupPolicy:
+      local: false
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: ose-configmap-reloader
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/ose-configmap-reloader:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: ose-prometheus-config-reloader
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/ose-prometheus-config-reloader:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: ose-cli
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/ose-cli:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    labels:
+      app: prometheus-operator
+    name: prometheus-operator
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: prometheus-operator:latest
+    postCommit: {}
+    resources: {}
+    runPolicy: Serial
+    source:
+      git:
+        uri: "https://github.com/coreos/prometheus-operator"
+        ref: "v0.26.0"
+      dockerfile: |-
+        FROM registry.access.redhat.com/rhel7:latest
+
+        ENV GOPATH /go
+        RUN mkdir $GOPATH
+
+        COPY . $GOPATH/src/github.com/coreos/prometheus-operator
+
+        RUN set -eo pipefail \
+          && rpm --import https://mirror.go-repo.io/centos/RPM-GPG-KEY-GO-REPO \
+          && curl -s https://mirror.go-repo.io/centos/go-repo.repo | tee /etc/yum.repos.d/go-repo.repo \
+          && yum install -y golang make git \
+          && mkdir -p /go/src/k8s.io \
+          && cd /go/src/k8s.io \
+          && git clone --depth=1 -b release-1.11 https://github.com/kubernetes/code-generator \
+          && GO111MODULE=on go get k8s.io/kube-openapi/cmd/openapi-gen \
+          && cd $GOPATH/src/github.com/coreos/prometheus-operator \
+          && make operator \
+          && cp $GOPATH/src/github.com/coreos/prometheus-operator/operator /usr/bin/ \
+          && rm -rf /go \
+          && yum erase -y golang make \
+          && yum clean all
+
+
+        # doesn't require a root user.
+        USER 1001
+
+        ENTRYPOINT ["/usr/bin/operator"]
+
+        LABEL \
+                io.k8s.description="This component manages the lifecycle and configuration of a Prometheus monitoring server as well as Prometheus Alertmanager clusters." \
+                com.redhat.component="prometheus-operator-container" \
+                maintainer="Frederic Branczyk <fbranczy@redhat.com>" \
+                name="openshift3/ose-prometheus-operator" \
+                License="ASL 2.0" \
+                io.k8s.display-name="Prometheus Operator" \
+                version="v3.11.43" \
+                vendor="Red Hat" \
+                io.openshift.tags="prometheus"
+
+
+        LABEL "authoritative-source-url"="registry.access.redhat.com" "distribution-scope"="public" "vendor"="Red Hat, Inc." "description"="This component manages the lifecycle and configuration of a Prometheus monitoring server as well as Prometheus Alertmanager clusters." "url"="https://access.redhat.com/containers/#/registry.access.redhat.com/openshift3/ose-prometheus-operator/images/v3.11.43-2" "vcs-type"="git" "architecture"="x86_64" "release"="2" "build-date"="2018-11-11T20:24:06.212845" "com.redhat.build-host"="cpt-0011.osbs.prod.upshift.rdu2.redhat.com" "vcs-ref"="0fd566b29cc232afa89940f621e6f19de1952dd3"
+      type: Git
+    strategy:
+      dockerStrategy:
+        from:
+          kind: ImageStreamTag
+          name: prometheus-operator-base:latest
+      type: Docker
+    triggers:
+    - imageChange: {}
+      type: ImageChange
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: prometheus-operator
+- apiVersion: ${DEPLOYMENT_API_VERSION}
+  kind: Deployment
+  metadata:
+    annotations:
+      #image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"prometheus-operator:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"prometheus-operator\")].image"}]'
+      image.openshift.io/triggers: |
+        [{"from":{"kind":"ImageStreamTag","name":"prometheus-operator:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"prometheus-operator\")].image"}]
+    labels:
+      k8s-app: prometheus-operator
+    name: prometheus-operator
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 3
+    selector:
+      matchLabels:
+        k8s-app: prometheus-operator
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        labels:
+          k8s-app: prometheus-operator
+      spec:
+        containers:
+        - args:
+          # - --kubelet-service=kube-system/kubelet
+          - --logtostderr=true
+          - --config-reloader-image=registry.access.redhat.com/openshift3/ose-configmap-reloader:v3.11
+          - --prometheus-config-reloader=registry.access.redhat.com/openshift3/ose-prometheus-config-reloader:v3.11
+          - --manage-crds=${PROMETHEUS_MANAGE_CRDS}
+          - --namespaces=${PROMETHEUS_OPERATOR_NAMESPACES}
+          image: prometheus-operator:latest
+          imagePullPolicy: IfNotPresent
+          name: prometheus-operator
+          ports:
+          - containerPort: 8080
+            name: http
+            protocol: TCP
+          resources:
+            limits:
+              cpu: 500m
+              memory: 196Mi
+            requests:
+              cpu: 100m
+              memory: 32Mi
+          securityContext: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        - name: prometheus-liveness-probes
+          image: registry.access.redhat.com/openshift3/ose-cli:v3.11
+          resources:
+            limits:
+              cpu: 200m
+              memory: 100Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          command:
+          - /bin/bash
+          - -c
+          - |
+            trap "exit 0" TERM INT
+            while true; do
+              sleep 10
+              for app in alertmanager prometheus; do
+                for pod in $(oc get pod -l app=$app -o jsonpath='{.items[*].metadata.name}'); do
+                  failed=${pod//-/_}_failed
+                  if ! oc_result=$(oc exec -c ${app} ${pod} stat /${app} 2>&1); then
+                    if [[ ! $oc_result =~ 'unable to upgrade connection: container not found' ]]; then
+                      echo "${oc_result}" >&2
+                    fi
+                    if [[ $oc_result =~ 'transport endpoint is not connected' ]]; then
+                      declare -i ${failed}+=1
+                      if [ ${!failed} -ge 3 ]; then
+                        declare -i ${failed}=0
+                        oc delete --wait=false pod ${pod}
+                      fi
+                    fi
+                  else
+                    declare -i ${failed}=0
+                  fi
+                done
+              done
+            done
+        dnsPolicy: ClusterFirst
+        nodeSelector: ${{PROMETHEUS_OPERATOR_NODE_SELECTOR}}
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        serviceAccount: prometheus-operator
+        serviceAccountName: prometheus-operator
+        terminationGracePeriodSeconds: 30
+parameters:
+- description: Namespace Prometheus Operator is deployed to.
+  name: NAMESPACE
+  required: true
+- description: Whether to import new images automatically.
+  name: SCHEDULE_IMAGE_IMPORTS
+  value: 'false'
+- description: Namespaces Prometheus Operator is watching (comma separated).
+  name: PROMETHEUS_OPERATOR_NAMESPACES
+  required: true
+- description: Whether the operator should create/update its custom resource definitions on the cluster.
+  name: PROMETHEUS_MANAGE_CRDS
+  value: "true"
+- description: 'API Version of deployment, must be "extensions/v1beta1" for OCP 3.9 and "apps/v1" for OCP 3.11. Defaults to "apps/v1"'
+  name: DEPLOYMENT_API_VERSION
+  value: "apps/v1"
+- description: 'Node selector for Prometheus Operator in JSON. Defaults to ''{"node-role.kubernetes.io/infra": "true"}''.'
+  name: PROMETHEUS_OPERATOR_NODE_SELECTOR
+  value: '{"node-role.kubernetes.io/infra": "true"}'

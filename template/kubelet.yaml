@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: kubelet
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: kubelet
+  spec:
+    lookupPolicy:
+      local: false
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/rhel7-minimal:latest
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      k8s-app: kubelet
+    name: kubelet
+  spec:
+    clusterIP: None
+    ports:
+    - name: https-metrics
+      port: 10250
+      protocol: TCP
+      targetPort: 10250
+    sessionAffinity: None
+    type: ClusterIP
+    selector:
+      k8s-app: kubelet
+- apiVersion: monitoring.coreos.com/v1
+  kind: ServiceMonitor
+  metadata:
+    labels:
+      k8s-app: kubelet
+      prometheus: ${PROMETHEUS_ID}
+    name: kubelet
+  spec:
+    endpoints:
+    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      honorLabels: true
+      interval: 30s
+      port: https-metrics
+      relabelings:
+      - action: replace
+        regex: ([^;]+);[^:]+:(.+)
+        replacement: $1:$2
+        separator: ;
+        sourceLabels:
+        - __meta_kubernetes_pod_host_ip
+        - __address__
+        targetLabel: __address__
+      scheme: https
+      targetPort: 0
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      honorLabels: true
+      interval: 30s
+      path: /metrics/cadvisor
+      port: https-metrics
+      relabelings:
+      - action: replace
+        regex: ([^;]+);[^:]+:(.+)
+        replacement: $1:$2
+        separator: ;
+        sourceLabels:
+        - __meta_kubernetes_pod_host_ip
+        - __address__
+        targetLabel: __address__
+      metricRelabelings:
+      - action: drop
+        sourceLabels: [__name__]
+        regex: container_(network_tcp_usage_total|network_udp_usage_total|cpu_user_seconds_total|memory_swap|memory_cache|last_seen|fs_(reads_total|writes_total|read_seconds_total|write_seconds_total|sector_(.*)|io_(.*)|reads_merged_total|writes_merged_total)|tasks_state|memory_failcnt|memory_failures_total|spec_memory_swap_limit_bytes|fs_(.*)_bytes_total|spec_(.*))
+      - action: replace
+        sourceLabels: [pod_name, container_name]
+        separator: ;
+        regex: (.+);(.+)
+        targetLabel: pod_container
+        replacement: $1/$2
+      scheme: https
+      targetPort: 0
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    jobLabel: k8s-app
+    namespaceSelector: {}
+    selector:
+      matchLabels:
+        k8s-app: kubelet
+- apiVersion: extensions/v1beta1
+  kind: DaemonSet  # This is a placeholder pod to discover endpoints of all nodes whose kubelet we want/are allowed to access
+  metadata:
+    name: kubelet
+    annotations:
+      image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"kubelet:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"kubelet\")].image"}]'
+  spec:
+    updateStrategy:
+      type: RollingUpdate
+    selector:
+        matchLabels:
+          k8s-app: kubelet
+    template:
+      metadata:
+        labels:
+          k8s-app: kubelet
+      spec:
+        nodeSelector: ${{KUBELET_NODE_SELECTOR}}
+        containers:
+        - image: kubelet:latest
+          command: ["/bin/bash", "-c", "trap : TERM INT; sleep infinity & wait"]
+          imagePullPolicy: IfNotPresent
+          name: kubelet
+          resources:
+            limits:
+              cpu: 250m
+              memory: 32Mi
+            requests:
+              cpu: 10m
+              memory: 8Mi
+          terminationMessagePath: /dev/termination-log
+        serviceAccount: default
+        terminationGracePeriodSeconds: 10
+parameters:
+- description: ID of Prometheus instance, is used in label keys and must be unique on cluster. Defaults to 'apps'.
+  name: PROMETHEUS_ID
+  value: apps
+- description: 'Node selector for Kubelet exporter in JSON. Defaults to ''{"node-role.kubernetes.io/infra": "true"}''.'
+  name: KUBELET_NODE_SELECTOR
+  value: '{"node-role.kubernetes.io/compute": "true"}'
+- description: Whether to import new images automatically.
+  name: SCHEDULE_IMAGE_IMPORTS
+  value: 'false'

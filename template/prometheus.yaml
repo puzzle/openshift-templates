@@ -1,0 +1,277 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: prometheus
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: prometheus
+    labels:
+      app: prometheus
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/prometheus:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: prometheus-proxy
+    labels:
+      app: prometheus
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - annotations: null
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/openshift3/oauth-proxy:v3.11
+      importPolicy:
+        scheduled: ${{SCHEDULE_IMAGE_IMPORTS}}
+      name: latest
+      referencePolicy:
+        type: Source
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    annotations:
+      serviceaccounts.openshift.io/oauth-redirectreference.prometheus-apps: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"prometheus-apps"}}'
+    labels:
+      app: prometheus
+    name: prometheus-apps
+- apiVersion: v1
+  stringData:
+    session_secret: ${PROMETHEUS_SESSION_SECRET}
+  kind: Secret
+  metadata:
+    labels:
+      app: prometheus
+    name: prometheus-apps-proxy
+  type: Opaque
+- apiVersion: v1
+  stringData:
+    auth: ${PROMETHEUS_GRAFANA_PASSWORD_HTPASSWD}
+  kind: Secret
+  metadata:
+    labels:
+      app: prometheus
+    name: prometheus-apps-htpasswd
+  type: Opaque
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      service.alpha.openshift.io/serving-cert-secret-name: prometheus-apps-tls
+    labels:
+      app: prometheus
+      prometheus: apps
+    name: prometheus-apps
+  spec:
+    ports:
+    - name: web
+      port: 9091
+      protocol: TCP
+      targetPort: web
+    selector:
+      app: prometheus
+      prometheus: apps
+    sessionAffinity: ClientIP
+    sessionAffinityConfig:
+      clientIP:
+        timeoutSeconds: 10800
+    type: ClusterIP
+- apiVersion: v1
+  kind: Route
+  metadata:
+    annotations:
+      haproxy.router.openshift.io/hsts_header: max-age=31536000;includeSubDomains
+      haproxy.router.openshift.io/ip_whitelist: ${PROMETHEUS_IP_WHITELIST}
+      openshift.io/host.generated: "true"
+      kubernetes.io/tls-acme: "true"
+    labels:
+      app: prometheus
+    name: prometheus-apps
+  spec:
+    host: ${PROMETHEUS_HOSTNAME}
+    port:
+      targetPort: web
+    tls:
+      termination: reencrypt
+      insecureEdgeTerminationPolicy: Redirect
+    to:
+      kind: Service
+      name: prometheus-apps
+      weight: 100
+    wildcardPolicy: None
+- apiVersion: monitoring.coreos.com/v1
+  kind: Prometheus
+  metadata:
+    labels:
+      app: prometheus
+      prometheus: apps
+    name: apps
+  spec:
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+              - key: prometheus
+                operator: In
+                values:
+                - apps
+            namespaces:
+            - ${NAMESPACE}
+            topologyKey: kubernetes.io/hostname
+          weight: 100
+    alerting:
+      alertmanagers:
+      - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+        name: alertmanager-main
+        namespace: ${NAMESPACE}
+        port: web
+        scheme: https
+        tlsConfig:
+          caFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+          serverName: alertmanager-main.${NAMESPACE}.svc
+    baseImage: prometheus
+    containers:
+    - args:
+      - -provider=openshift
+      - -https-address=:9091
+      - -http-address=
+      - -email-domain=*
+      - -upstream=http://localhost:9090
+      - -htpasswd-file=/etc/proxy/htpasswd/auth
+      - -openshift-service-account=prometheus-apps
+      - '-openshift-sar={"namespace":"${NAMESPACE}","resource":"services","name":"prometheus-apps","verb":"get"}'
+      - '-openshift-delegate-urls=${PROMETHEUS_OAUTH_DELEGATE_URLS}'
+      - -tls-cert=/etc/tls/private/tls.crt
+      - -tls-key=/etc/tls/private/tls.key
+      - -client-secret-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+      - -cookie-secret-file=/etc/proxy/secrets/session_secret
+      - -openshift-ca=/etc/pki/tls/cert.pem
+      - -openshift-ca=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      - -skip-auth-regex=^/metrics
+      env:
+      - name: NAMESPACE
+        value: ${NAMESPACE}
+      image: prometheus-proxy:latest
+      name: prometheus-proxy
+      ports:
+      - containerPort: 9091
+        name: web
+      resources:
+        limits:
+          cpu: 250m
+          memory: 64Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi
+      volumeMounts:
+      - mountPath: /etc/tls/private
+        name: secret-prometheus-apps-tls
+      - mountPath: /etc/proxy/secrets
+        name: secret-prometheus-apps-proxy
+      - mountPath: /etc/proxy/htpasswd
+        name: secret-prometheus-apps-htpasswd
+    externalUrl: https://${PROMETHEUS_HOSTNAME}/
+    listenLocal: true
+    nodeSelector: ${{PROMETHEUS_NODE_SELECTOR}}
+    replicas: ${{PROMETHEUS_REPLICAS}}
+    resources:
+      limits:
+        cpu: ${PROMETHEUS_CPU_LIMIT}
+        memory: ${PROMETHEUS_MEMORY_LIMIT}
+      requests:
+        cpu: ${PROMETHEUS_CPU_REQUEST}
+        memory: ${PROMETHEUS_MEMORY_REQUEST}
+    retention: ${PROMETHEUS_RETENTION_TIME}
+    ruleNamespaceSelector:
+      any: true
+    ruleSelector:
+      matchLabels:
+        prometheus: ${PROMETHEUS_ID}
+    secrets:
+    - prometheus-apps-tls
+    - prometheus-apps-proxy
+    - prometheus-apps-htpasswd
+    securityContext: {}
+    serviceAccountName: prometheus-apps
+    serviceMonitorNamespaceSelector:
+      any: true
+    serviceMonitorSelector:
+      matchLabels:
+        prometheus: ${PROMETHEUS_ID}
+    storage:
+      resources: {}
+      volumeClaimTemplate:
+        metadata:
+          name: tsdb
+        spec:
+          selector: ${{PROMETHEUS_STORAGE_SELECTOR}}
+          resources:
+            requests:
+              storage: ${PROMETHEUS_STORAGE_SIZE}
+    tag: latest
+    version: v2.3.2
+parameters:
+- description: Namespace Prometheus is deployed to.
+  name: NAMESPACE
+  required: true
+- description: Whether to import new images automatically.
+  name: SCHEDULE_IMAGE_IMPORTS
+  value: 'false'
+- description: 'IP whitelist for Prometheus route.'
+  name: PROMETHEUS_IP_WHITELIST
+- description: 'External hostname of Prometheus.'
+  name: PROMETHEUS_HOSTNAME
+  required: true
+- description: ID of Prometheus instance, is used in label keys and must be unique on cluster. Defaults to 'apps'.
+  name: PROMETHEUS_ID
+  value: apps
+- description: JSON map configuring delegated authorization against OpenShift API.
+  name: PROMETHEUS_OAUTH_DELEGATE_URLS
+  value: '{"/": {"namespace":"$(NAMESPACE)","resource":"services","name":"prometheus-$(PROMETHEUS_ID)","verb":"get"}}'
+- description: Session secret used for Prometheus session signing
+  displayName: Prometheus Session Secret
+  name: PROMETHEUS_SESSION_SECRET
+  required: true
+- description: Basic auth password for Grafana in htpasswd format.
+  displayName: Prometheus Grafana Password Htpasswd
+  name: PROMETHEUS_GRAFANA_PASSWORD_HTPASSWD
+  required: true
+- description: 'Node selector for Prometheus in JSON. Defaults to ''{"node-role.kubernetes.io/infra": "true"}''.'
+  name: PROMETHEUS_NODE_SELECTOR
+  value: '{"node-role.kubernetes.io/infra": "true"}'
+- description: Prometheus persistence volume size. Defaults to 5Gi.
+  name: PROMETHEUS_STORAGE_SIZE
+  value: 5Gi
+- description: Prometheus storage claim selector. Defaults to null.
+  name: PROMETHEUS_STORAGE_SELECTOR
+  value: 'null'
+- description: Prometheus data retention time. Defaults to 15d.
+  name: PROMETHEUS_RETENTION_TIME
+  value: 15d
+- description: Number of Prometheus instances to run.
+  name: PROMETHEUS_REPLICAS
+  value: '2'
+- name: PROMETHEUS_MEMORY_LIMIT
+  required: true
+- name: PROMETHEUS_CPU_LIMIT
+  required: true
+- name: PROMETHEUS_MEMORY_REQUEST
+  required: true
+- name: PROMETHEUS_CPU_REQUEST
+  required: true
