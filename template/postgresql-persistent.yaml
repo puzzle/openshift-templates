@@ -88,7 +88,7 @@ objects:
   metadata:
     name: ${POSTGRESQL_SERVICE_NAME}
   spec:
-    storageClassName: ${POSTGRESQL_STORAGE_CLASS}
+    storageClassName: ${{POSTGRESQL_STORAGE_CLASS}}
     accessModes:
     - ReadWriteOnce
     resources:
@@ -155,8 +155,10 @@ objects:
             timeoutSeconds: 1
           resources:
             requests:
+              cpu: ${POSTGRESQL_CPU_REQUEST}
               memory: ${POSTGRESQL_MEMORY_REQUEST}
             limits:
+              cpu: ${POSTGRESQL_CPU_LIMIT}
               memory: ${POSTGRESQL_MEMORY_LIMIT}
           securityContext:
             capabilities: {}
@@ -187,11 +189,21 @@ parameters:
   name: POSTGRESQL_IMAGE
   required: true
   value: registry.access.redhat.com/rhscl/postgresql-10-rhel7:latest
+- description: Minimum amount of cpu the container needs to start and reserves on the cluster.
+  displayName: CPU Request
+  name: POSTGRESQL_CPU_REQUEST
+  required: true
+  value: 10m
 - description: Minimum amount of memory the container needs to start and reserves on the cluster.
   displayName: Memory Request
   name: POSTGRESQL_MEMORY_REQUEST
   required: true
   value: 512Mi
+- description: Maximum amount of cpu the container can use.
+  displayName: Memory Limit
+  name: POSTGRESQL_CPU_LIMIT
+  required: true
+  value: '2'
 - description: Maximum amount of memory the container can use.
   displayName: Memory Limit
   name: POSTGRESQL_MEMORY_LIMIT

@@ -2,7 +2,7 @@
 
 Variable für die zu installierende Bereitstellungsumgebung (Stage) definieren, wird in den folgenden Kommandos verwendet:
 [source,bash]
-STAGE=<vagrant | integration | production>
+STAGE=<test | production>
 
 Umgebungsabhängige Shell Variablen einlesen welche für die folgende Installation benötigt werden.
 [source,bash]
